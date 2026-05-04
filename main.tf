@@ -2,7 +2,6 @@ data "aws_availability_zones" "available" {}
 
 # VPC
 
-
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -17,9 +16,7 @@ resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
 }
 
-
 # SUBNETS
-
 
 resource "aws_subnet" "public" {
   count                   = 2
@@ -36,9 +33,7 @@ resource "aws_subnet" "private" {
   availability_zone = data.aws_availability_zones.available.names[count.index]
 }
 
-
 # NAT
-
 
 resource "aws_eip" "nat" {
   count  = 2
@@ -53,9 +48,7 @@ resource "aws_nat_gateway" "nat" {
   depends_on = [aws_internet_gateway.igw]
 }
 
-
 # ROUTES
-
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
@@ -88,17 +81,13 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private[count.index].id
 }
 
-
 # S3
-
 
 resource "aws_s3_bucket" "images" {
   bucket = "image-processor-${var.environment}-${var.account_suffix}"
 }
 
-
 # SQS
-
 
 resource "aws_sqs_queue" "dlq" {
   name = "image-processor-${var.environment}-dlq"
@@ -133,9 +122,7 @@ resource "aws_sqs_queue_policy" "s3_to_sqs" {
   })
 }
 
-
 # S3 -> SQS
-
 
 resource "aws_s3_bucket_notification" "s3_to_sqs" {
   bucket = aws_s3_bucket.images.id
@@ -148,9 +135,7 @@ resource "aws_s3_bucket_notification" "s3_to_sqs" {
   depends_on = [aws_sqs_queue_policy.s3_to_sqs]
 }
 
-
-# IAM
-
+# IAM ROLES
 
 resource "aws_iam_role" "upload_role" {
   name = "upload-role-${var.environment}"
@@ -178,9 +163,51 @@ resource "aws_iam_role" "crop_role" {
   })
 }
 
+# IAM POLICIES
+
+resource "aws_iam_policy" "upload_s3_policy" {
+  name = "upload-s3-${var.environment}"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["s3:PutObject"]
+      Resource = "${aws_s3_bucket.images.arn}/*"
+    }]
+  })
+}
+
+resource "aws_iam_policy" "crop_s3_policy" {
+  name = "crop-s3-${var.environment}"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.images.arn}/uploads/*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.images.arn}/processed/*"
+      }
+    ]
+  })
+}
+
+# IAM ATTACHMENTS
+
 resource "aws_iam_role_policy_attachment" "upload_basic" {
   role       = aws_iam_role.upload_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "upload_s3_attach" {
+  role       = aws_iam_role.upload_role.name
+  policy_arn = aws_iam_policy.upload_s3_policy.arn
 }
 
 resource "aws_iam_role_policy_attachment" "crop_basic" {
@@ -193,12 +220,20 @@ resource "aws_iam_role_policy_attachment" "crop_vpc" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "crop_sqs" {
+  role       = aws_iam_role.crop_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "crop_s3_attach" {
+  role       = aws_iam_role.crop_role.name
+  policy_arn = aws_iam_policy.crop_s3_policy.arn
+}
 
 # SECURITY GROUP
 
-
 resource "aws_security_group" "lambda_sg" {
-  name   = "sg-lambda-${var.environment}"
+  name   = "lambda-sg-${var.environment}"
   vpc_id = aws_vpc.main.id
 
   egress {
@@ -209,9 +244,7 @@ resource "aws_security_group" "lambda_sg" {
   }
 }
 
-
-# LAMBDAS
-
+# LAMBDA
 
 resource "aws_lambda_function" "upload" {
   function_name = "upload-${var.environment}"
@@ -222,6 +255,13 @@ resource "aws_lambda_function" "upload" {
 
   filename         = "lambda/lambda_dummy.zip"
   source_code_hash = filebase64sha256("lambda/lambda_dummy.zip")
+
+  environment {
+    variables = {
+      S3_BUCKET     = aws_s3_bucket.images.bucket
+      UPLOAD_PREFIX = "uploads/"
+    }
+  }
 }
 
 resource "aws_lambda_function" "crop" {
@@ -238,6 +278,13 @@ resource "aws_lambda_function" "crop" {
     subnet_ids         = aws_subnet.private[*].id
     security_group_ids = [aws_security_group.lambda_sg.id]
   }
+
+  environment {
+    variables = {
+      S3_BUCKET        = aws_s3_bucket.images.bucket
+      PROCESSED_PREFIX = "processed/"
+    }
+  }
 }
 
 resource "aws_lambda_event_source_mapping" "sqs_trigger" {
@@ -246,9 +293,7 @@ resource "aws_lambda_event_source_mapping" "sqs_trigger" {
   batch_size       = 5
 }
 
-
 # API GATEWAY
-
 
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "image-api-${var.environment}"
@@ -275,6 +320,12 @@ resource "aws_lambda_permission" "apigw" {
   principal     = "apigateway.amazonaws.com"
 }
 
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.http_api.id
+  name        = "$default"
+  auto_deploy = true
+}
+
 # CLOUDWATCH + SNS
 
 resource "aws_cloudwatch_log_group" "upload_logs" {
@@ -295,4 +346,18 @@ resource "aws_sns_topic_subscription" "email" {
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
+}
+
+# OUTPUTS
+
+output "api_url" {
+  value = aws_apigatewayv2_api.http_api.api_endpoint
+}
+
+output "s3_bucket" {
+  value = aws_s3_bucket.images.bucket
+}
+
+output "sqs_queue" {
+  value = aws_sqs_queue.main_queue.id
 }
