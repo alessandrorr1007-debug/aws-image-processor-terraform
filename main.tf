@@ -284,3 +284,64 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.upload.function_name
   principal     = "apigateway.amazonaws.com"
 }
+
+resource "aws_s3_bucket_notification" "s3_to_sqs" {
+  bucket = aws_s3_bucket.images.id
+
+  queue {
+    queue_arn = aws_sqs_queue.main_queue.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sqs_queue_policy.s3_to_sqs]
+}
+
+resource "aws_security_group" "vpce_sqs_sg" {
+  name        = "sg-vpce-sqs-${var.environment}"
+  description = "Security group for SQS VPC Endpoint"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id       = aws_vpc.main.id
+  service_name = "com.amazonaws.us-east-1.s3"
+
+  vpc_endpoint_type = "Gateway"
+
+  route_table_ids = concat(
+    aws_route_table.public[*].id,
+    aws_route_table.private[*].id
+  )
+
+  tags = {
+    Name = "vpce-s3-${var.environment}"
+  }
+}
+
+resource "aws_vpc_endpoint" "sqs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.us-east-1.sqs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpce_sqs_sg.id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "vpce-sqs-${var.environment}"
+  }
+
+security_group_ids = [aws_security_group.lambda_sg.id]
