@@ -1,0 +1,15 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Variables sensibles
+*.tfvars
+.env
+
+# Lambdas
+lambda/*.zip
+
+# IDE
+.vscode/
