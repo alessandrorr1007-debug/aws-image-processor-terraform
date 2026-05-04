@@ -1,5 +1,5 @@
 variable "environment" {
-  description = "Entorno de despliegue (dev, qa, prod)"
+  description = "Entorno (dev, qa, prod)"
   type        = string
 }
 
@@ -10,6 +10,11 @@ variable "vpc_cidr" {
 }
 
 variable "account_suffix" {
-  description = "Sufijo para evitar nombres duplicados en S3"
+  description = "Sufijo único S3"
+  type        = string
+}
+
+variable "alert_email" {
+  description = "Correo para alertas"
   type        = string
 }
